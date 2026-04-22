@@ -43,6 +43,7 @@ STATE_FILE = Path(os.getenv("MATCH_SEARCH_STATE_FILE", str(Path(__file__).resolv
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("MATCH_SEARCH_REQUEST_TIMEOUT_SECONDS", "30"))
 MAX_CURSOR_PAGES = int(os.getenv("MATCH_SEARCH_MAX_CURSOR_PAGES", "50"))
 RETRY_FAILED = os.getenv("MATCH_SEARCH_RETRY_FAILED", "false").lower() in {"1", "true", "yes"}
+RETRY_RETRYABLE = os.getenv("MATCH_SEARCH_RETRY_RETRYABLE", "true").lower() in {"1", "true", "yes"}
 
 
 def now_text() -> str:
@@ -58,7 +59,7 @@ def default_state() -> Dict[str, Any]:
         "version": 1,
         "updated_at": now_text(),
         "processed": {},
-        "stats": {"success": 0, "fail": 0},
+        "stats": {"success": 0, "fail": 0, "retryable_fail": 0},
     }
 
 
@@ -70,7 +71,7 @@ def load_state() -> Dict[str, Any]:
         if not isinstance(data, dict):
             return default_state()
         data.setdefault("processed", {})
-        data.setdefault("stats", {"success": 0, "fail": 0})
+        data.setdefault("stats", {"success": 0, "fail": 0, "retryable_fail": 0})
         return data
     except Exception:
         return default_state()
@@ -85,7 +86,20 @@ def should_process_match(state: Dict[str, Any], match_id: str) -> bool:
     item = (state.get("processed") or {}).get(match_id)
     if not item:
         return True
-    if RETRY_FAILED and (item.get("status") == "fail"):
+    status = item.get("status")
+    if RETRY_RETRYABLE and status == "retryable_fail":
+        return True
+    if RETRY_RETRYABLE and status == "fail":
+        err_text = " ".join([str(x) for x in (item.get("errors") or [])]).lower()
+        if (
+            "playwright抓取异常" in err_text
+            or "status=429" in err_text
+            or "rate limit exceeded per hour" in err_text
+            or "timed out" in err_text
+            or "connection reset" in err_text
+        ):
+            return True
+    if RETRY_FAILED and status in {"fail", "retryable_fail"}:
         return True
     return False
 
@@ -203,6 +217,7 @@ def build_cycle_summary(
         f"state_file: {STATE_FILE}",
         f"state_total_success: {state_stats.get('success', 0)}",
         f"state_total_fail: {state_stats.get('fail', 0)}",
+        f"state_total_retryable_fail: {state_stats.get('retryable_fail', 0)}",
     ]
     if fetch_errors:
         lines.append("fetch_errors:")
@@ -261,6 +276,8 @@ def main():
 
             match_id = str(task.get("match_id"))
             ok = bool(rec.get("ok"))
+            retryable = bool(rec.get("retryable"))
+            status = "success" if ok else ("retryable_fail" if retryable else "fail")
             state_item = {
                 "match_id": match_id,
                 "sport_id": str(task.get("sport_id") or ""),
@@ -269,7 +286,7 @@ def main():
                 "home_name": task.get("home_name"),
                 "away_name": task.get("away_name"),
                 "source": task.get("source"),
-                "status": "success" if ok else "fail",
+                "status": status,
                 "processed_at": now_text(),
                 "post_total": rec.get("post_total", 0),
                 "post_success": rec.get("post_success", 0),
@@ -277,9 +294,11 @@ def main():
                 "errors": rec.get("errors", []),
             }
             state.setdefault("processed", {})[match_id] = state_item
-            stats = state.setdefault("stats", {"success": 0, "fail": 0})
+            stats = state.setdefault("stats", {"success": 0, "fail": 0, "retryable_fail": 0})
             if ok:
                 stats["success"] = int(stats.get("success", 0)) + 1
+            elif retryable:
+                stats["retryable_fail"] = int(stats.get("retryable_fail", 0)) + 1
             else:
                 stats["fail"] = int(stats.get("fail", 0)) + 1
             save_state(state)

@@ -47,6 +47,10 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() in {"1", "true", "yes"}
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "3600"))
 CONTINUOUS_RUN = os.getenv("CONTINUOUS_RUN", "true").lower() in {"1", "true", "yes"}
 PROCESSING_LOOP_DELAY_SECONDS = int(os.getenv("PROCESSING_LOOP_DELAY_SECONDS", "30"))
+PLAYWRIGHT_MAX_RETRIES = int(os.getenv("PLAYWRIGHT_MAX_RETRIES", "3"))
+PLAYWRIGHT_RETRY_DELAY_SECONDS = float(os.getenv("PLAYWRIGHT_RETRY_DELAY_SECONDS", "2"))
+ATHENA_UPLOAD_MAX_RETRIES = int(os.getenv("ATHENA_UPLOAD_MAX_RETRIES", "6"))
+ATHENA_UPLOAD_RETRY_BASE_SECONDS = float(os.getenv("ATHENA_UPLOAD_RETRY_BASE_SECONDS", "5"))
 
 MOBILE_HEADERS = {
     "User-Agent": (
@@ -89,9 +93,32 @@ def sanitize_filename(value: str) -> str:
 
 
 def build_logo_filename(team: dict, default_name: str) -> str:
-    team_name = sanitize_filename(team.get("name") or team.get("short_name") or default_name)
-    team_id = sanitize_filename(str(team.get("id") or "unknown"))
-    return f"{team_name}_{team_id}.png"
+    team_id = sanitize_filename(str(team.get("id") or "").strip())
+    if not team_id:
+        team_id = f"{sanitize_filename(default_name)}_unknown"
+    return f"{team_id}.png"
+
+
+def is_athena_rate_limited_error(exc: Exception) -> bool:
+    text = str(exc)
+    return (
+        "status=429" in text
+        or "Rate limit exceeded per hour" in text
+        or '"code":1003' in text
+    )
+
+
+def detect_retryable_errors(errors: List[str]) -> bool:
+    for err in errors:
+        msg = str(err)
+        msg_l = msg.lower()
+        if "playwright抓取异常" in msg:
+            return True
+        if "status=429" in msg or "rate limit exceeded per hour" in msg_l:
+            return True
+        if "timed out" in msg_l or "connection reset" in msg_l or "temporarily unavailable" in msg_l:
+            return True
+    return False
 
 
 def fetch_html(url: str, headers: Dict[str, str]) -> str:
@@ -312,90 +339,111 @@ def enrich_with_playwright(result: dict, match_url: str, match_id: str) -> dict:
         "breadcrumb",
     ]
 
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(**p.devices["iPhone 13"])
-            page = context.new_page()
-            captured = []
-
-            def on_response(response):
-                if response.request.resource_type not in {"xhr", "fetch"}:
-                    return
-                url_l = response.url.lower()
-                is_match_related = match_id in url_l or f"event_id={match_id}" in url_l
-                is_statscore_widget = "widgets.statscore.com/api/ssr/render-widget" in url_l
-                if not (is_match_related or is_statscore_widget):
-                    return
-                if (not is_statscore_widget) and (not any(k in url_l for k in keywords)):
-                    return
-                try:
-                    ctype = response.headers.get("content-type", "").lower()
-                    if "json" not in ctype:
-                        return
-                    data = response.json()
-                    captured.append((response.url, data))
-                except Exception:
-                    return
-
-            page.on("response", on_response)
-            page.goto(match_url, wait_until="domcontentloaded", timeout=45000)
-            page.wait_for_timeout(5000)
-
-            img_srcs = page.eval_on_selector_all(
-                "img",
-                "els => els.map(e => e.getAttribute('src')).filter(Boolean)",
-            )
-            pngs = [x for x in img_srcs if x.lower().endswith(".png")]
-            pngs = [x for x in pngs if not re.search(r"seal|stamp|license|anjouan|eighteen-plus", x, re.I)]
-            if pngs and not result["home"].get("logo"):
-                result["home"]["logo"] = abs_url(pngs[0])
-            if len(pngs) > 1 and not result["away"].get("logo"):
-                result["away"]["logo"] = abs_url(pngs[1])
-
-            hit_urls = set()
-            for api_url, data in captured:
-                hit_urls.add(api_url)
-                err = parse_match_api_error(api_url, data)
-                if err:
-                    result["errors"].append(err)
-                err = parse_statscore_widget_eventid_error(api_url, data)
-                if err:
-                    result["errors"].append(err)
-
-                info = deep_find_team_info(data)
-                sport_ids = deep_find_sport_ids(data)
-                for sport_id in sport_ids:
-                    if sport_id not in result["sport_ids"]:
-                        result["sport_ids"].append(sport_id)
-                if not result.get("sport_id") and result["sport_ids"]:
-                    result["sport_id"] = result["sport_ids"][0]
-
-                useful = any(
-                    [
-                        info["home"]["id"],
-                        info["away"]["id"],
-                        info["home"]["name"],
-                        info["away"]["name"],
-                        info["home"]["logo"],
-                        info["away"]["logo"],
-                    ]
+    for attempt in range(1, PLAYWRIGHT_MAX_RETRIES + 1):
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=True,
+                    chromium_sandbox=False,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-gpu",
+                        "--disable-dev-shm-usage",
+                    ],
                 )
-                if not useful:
-                    continue
+                try:
+                    context = browser.new_context(**p.devices["iPhone 13"])
+                    page = context.new_page()
+                    captured = []
 
-                for side in ("home", "away"):
-                    result[side]["id"] = result[side]["id"] or info[side]["id"]
-                    result[side]["name"] = result[side]["name"] or info[side]["name"]
-                    result[side]["abbr"] = result[side]["abbr"] or info[side]["abbr"]
-                    result[side]["logo"] = result[side]["logo"] or abs_url(info[side]["logo"])
+                    def on_response(response):
+                        if response.request.resource_type not in {"xhr", "fetch"}:
+                            return
+                        url_l = response.url.lower()
+                        is_match_related = match_id in url_l or f"event_id={match_id}" in url_l
+                        is_statscore_widget = "widgets.statscore.com/api/ssr/render-widget" in url_l
+                        if not (is_match_related or is_statscore_widget):
+                            return
+                        if (not is_statscore_widget) and (not any(k in url_l for k in keywords)):
+                            return
+                        try:
+                            ctype = response.headers.get("content-type", "").lower()
+                            if "json" not in ctype:
+                                return
+                            data = response.json()
+                            captured.append((response.url, data))
+                        except Exception:
+                            return
 
-            result["api_hits"] = [{"mode": "mobile", "url": u} for u in sorted(hit_urls)]
-            result["source_mode"] = "mobile"
-            context.close()
-            browser.close()
-    except Exception as exc:
-        result["errors"].append(f"playwright抓取异常: {exc}")
+                    page.on("response", on_response)
+                    page.goto(match_url, wait_until="domcontentloaded", timeout=45000)
+                    page.wait_for_timeout(5000)
+
+                    img_srcs = page.eval_on_selector_all(
+                        "img",
+                        "els => els.map(e => e.getAttribute('src')).filter(Boolean)",
+                    )
+                    pngs = [x for x in img_srcs if x.lower().endswith(".png")]
+                    pngs = [x for x in pngs if not re.search(r"seal|stamp|license|anjouan|eighteen-plus", x, re.I)]
+                    if pngs and not result["home"].get("logo"):
+                        result["home"]["logo"] = abs_url(pngs[0])
+                    if len(pngs) > 1 and not result["away"].get("logo"):
+                        result["away"]["logo"] = abs_url(pngs[1])
+
+                    hit_urls = set()
+                    for api_url, data in captured:
+                        hit_urls.add(api_url)
+                        err = parse_match_api_error(api_url, data)
+                        if err:
+                            result["errors"].append(err)
+                        err = parse_statscore_widget_eventid_error(api_url, data)
+                        if err:
+                            result["errors"].append(err)
+
+                        info = deep_find_team_info(data)
+                        sport_ids = deep_find_sport_ids(data)
+                        for sport_id in sport_ids:
+                            if sport_id not in result["sport_ids"]:
+                                result["sport_ids"].append(sport_id)
+                        if not result.get("sport_id") and result["sport_ids"]:
+                            result["sport_id"] = result["sport_ids"][0]
+
+                        useful = any(
+                            [
+                                info["home"]["id"],
+                                info["away"]["id"],
+                                info["home"]["name"],
+                                info["away"]["name"],
+                                info["home"]["logo"],
+                                info["away"]["logo"],
+                            ]
+                        )
+                        if not useful:
+                            continue
+
+                        for side in ("home", "away"):
+                            result[side]["id"] = result[side]["id"] or info[side]["id"]
+                            result[side]["name"] = result[side]["name"] or info[side]["name"]
+                            result[side]["abbr"] = result[side]["abbr"] or info[side]["abbr"]
+                            result[side]["logo"] = result[side]["logo"] or abs_url(info[side]["logo"])
+
+                    result["api_hits"] = [{"mode": "mobile", "url": u} for u in sorted(hit_urls)]
+                    result["source_mode"] = "mobile"
+                    context.close()
+                    return result
+                finally:
+                    browser.close()
+        except Exception as exc:
+            if attempt >= PLAYWRIGHT_MAX_RETRIES:
+                result["errors"].append(f"playwright抓取异常: {exc}")
+            else:
+                sleep_s = PLAYWRIGHT_RETRY_DELAY_SECONDS * attempt
+                print(
+                    f"playwright抓取失败，{sleep_s:.1f}s后重试 "
+                    f"({attempt}/{PLAYWRIGHT_MAX_RETRIES}): {exc}"
+                )
+                time.sleep(sleep_s)
 
     # 去重，避免同类错误刷太多
     result["errors"] = list(dict.fromkeys(result["errors"]))
@@ -481,23 +529,38 @@ def upload_outputs_to_s3(result: dict, sport_dir: Path, json_path: Path):
             issues.append(f"{label} 文件不存在: {file_path}")
             continue
         resolved = None
-        try:
-            resolved = client.resolve_upload_target(Key=key, Bucket=S3_BUCKET_NAME)
-            if not DRY_RUN:
-                client.upload_file(Filename=str(file_path), Bucket=S3_BUCKET_NAME, Key=key)
-            uploaded.append(
-                {
-                    "label": label,
-                    "file": file_path.name,
-                    "requested_key": key,
-                    "bucket": (resolved or {}).get("bucket"),
-                    "final_key": (resolved or {}).get("final_key"),
-                    "cdn_url": (resolved or {}).get("cdn_url"),
-                }
-            )
-        except Exception as exc:
+        last_exc = None
+        for attempt in range(1, ATHENA_UPLOAD_MAX_RETRIES + 1):
+            try:
+                resolved = client.resolve_upload_target(Key=key, Bucket=S3_BUCKET_NAME)
+                if not DRY_RUN:
+                    client.upload_file(Filename=str(file_path), Bucket=S3_BUCKET_NAME, Key=key)
+                uploaded.append(
+                    {
+                        "label": label,
+                        "file": file_path.name,
+                        "requested_key": key,
+                        "bucket": (resolved or {}).get("bucket"),
+                        "final_key": (resolved or {}).get("final_key"),
+                        "cdn_url": (resolved or {}).get("cdn_url"),
+                    }
+                )
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if is_athena_rate_limited_error(exc) and attempt < ATHENA_UPLOAD_MAX_RETRIES:
+                    wait_s = ATHENA_UPLOAD_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+                    print(
+                        f"{label} Athena限流，{wait_s:.1f}s后重试 "
+                        f"({attempt}/{ATHENA_UPLOAD_MAX_RETRIES})"
+                    )
+                    time.sleep(wait_s)
+                    continue
+                break
+        if last_exc is not None:
             final_key = (resolved or {}).get("final_key", key)
-            issues.append(f"{label} 上传失败: key={final_key}, err={exc}")
+            issues.append(f"{label} 上传失败: key={final_key}, err={last_exc}")
 
     result["s3_uploads"] = uploaded
     result["s3_upload_issues"] = issues
@@ -563,6 +626,7 @@ def process_task(task: Dict[str, Any], index: int, total: int) -> Dict[str, Any]
             "match_id": None,
             "sport_id": None,
             "ok": False,
+            "retryable": False,
             "post_total": 0,
             "post_success": 0,
             "post_fail": 0,
@@ -628,6 +692,7 @@ def process_task(task: Dict[str, Any], index: int, total: int) -> Dict[str, Any]
             "match_id": match_id,
             "sport_id": None,
             "ok": False,
+            "retryable": detect_retryable_errors(result["errors"]),
             "post_total": 0,
             "post_success": 0,
             "post_fail": 0,
@@ -641,6 +706,7 @@ def process_task(task: Dict[str, Any], index: int, total: int) -> Dict[str, Any]
             "match_id": match_id,
             "sport_id": result["sport_id"],
             "ok": False,
+            "retryable": detect_retryable_errors(result["errors"]),
             "post_total": 0,
             "post_success": 0,
             "post_fail": 0,
@@ -655,6 +721,7 @@ def process_task(task: Dict[str, Any], index: int, total: int) -> Dict[str, Any]
             "match_id": match_id,
             "sport_id": result["sport_id"],
             "ok": False,
+            "retryable": detect_retryable_errors(result["errors"]),
             "post_total": 0,
             "post_success": 0,
             "post_fail": 0,
@@ -706,6 +773,7 @@ def process_task(task: Dict[str, Any], index: int, total: int) -> Dict[str, Any]
         "match_id": match_id,
         "sport_id": result["sport_id"],
         "ok": ok,
+        "retryable": (not ok) and detect_retryable_errors(result["errors"]),
         "post_total": post_total,
         "post_success": post_success,
         "post_fail": post_fail,

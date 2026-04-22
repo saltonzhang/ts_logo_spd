@@ -483,9 +483,10 @@ def sanitize_filename(value: str) -> str:
 
 
 def build_logo_filename(team: dict, default_name: str) -> str:
-    team_name = sanitize_filename(team.get("name") or team.get("short_name") or default_name)
-    team_id = sanitize_filename(str(team.get("id") or "unknown"))
-    return f"{team_name}_{team_id}.png"
+    team_id = sanitize_filename(str(team.get("id") or "").strip())
+    if not team_id:
+        team_id = f"{sanitize_filename(default_name)}_unknown"
+    return f"{team_id}.png"
 
 
 def save_outputs(result: dict):
