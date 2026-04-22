@@ -15,6 +15,7 @@ __pycache__/
 *.png
 match_*.json
 unknown_sport/
+match_search_state.json
 
 # Docker local artifacts
 *.log
