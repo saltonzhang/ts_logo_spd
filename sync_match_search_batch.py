@@ -17,7 +17,6 @@ MATCH_SEARCH_API_URL = os.getenv(
     "https://xpbet-service-api.helix.city/v1/match/search",
 )
 MATCH_SEARCH_SPORT_IDS = [x.strip() for x in os.getenv("MATCH_SEARCH_SPORT_IDS", "6046,48242").split(",") if x.strip()]
-MATCH_SEARCH_STATUSES = [x.strip() for x in os.getenv("MATCH_SEARCH_STATUSES", "1").split(",") if x.strip()]
 MATCH_SEARCH_TZ = os.getenv("MATCH_SEARCH_TIMEZONE", "Asia/Shanghai")
 MATCH_SEARCH_SOURCE = os.getenv("MATCH_SEARCH_X_SOURCE", "ls")
 MATCH_SEARCH_HEADERS = {
@@ -109,8 +108,8 @@ def normalize_task(source: str, sport_id: str, event: Dict[str, Any]) -> Optiona
     }
 
 
-def fetch_tasks_for_source(status: str, sport_id: str) -> Tuple[List[Dict[str, Any]], List[str]]:
-    source_name = f"sport_id={sport_id}&status={status}"
+def fetch_tasks_for_source(sport_id: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+    source_name = f"sport_id={sport_id}"
     tasks: List[Dict[str, Any]] = []
     errors: List[str] = []
     cursor = "0"
@@ -120,7 +119,8 @@ def fetch_tasks_for_source(status: str, sport_id: str) -> Tuple[List[Dict[str, A
         if cursor in visited_cursor:
             break
         visited_cursor.add(cursor)
-        params = {"status": status, "sport_id": sport_id, "cursor": cursor}
+        # 按需求仅使用 sport_id + cursor 获取列表
+        params = {"sport_id": sport_id, "cursor": cursor}
         try:
             resp = requests.get(
                 MATCH_SEARCH_API_URL,
@@ -159,11 +159,10 @@ def fetch_tasks_for_source(status: str, sport_id: str) -> Tuple[List[Dict[str, A
 def fetch_all_tasks() -> Tuple[List[Dict[str, Any]], List[str]]:
     all_tasks: List[Dict[str, Any]] = []
     all_errors: List[str] = []
-    for status in MATCH_SEARCH_STATUSES:
-        for sport_id in MATCH_SEARCH_SPORT_IDS:
-            tasks, errors = fetch_tasks_for_source(status=status, sport_id=sport_id)
-            all_tasks.extend(tasks)
-            all_errors.extend(errors)
+    for sport_id in MATCH_SEARCH_SPORT_IDS:
+        tasks, errors = fetch_tasks_for_source(sport_id=sport_id)
+        all_tasks.extend(tasks)
+        all_errors.extend(errors)
 
     # Deduplicate by match_id, keep first.
     dedup: Dict[str, Dict[str, Any]] = {}
