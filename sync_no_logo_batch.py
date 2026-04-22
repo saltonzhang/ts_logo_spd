@@ -46,6 +46,7 @@ MAX_MATCHES = int(os.getenv("MAX_MATCHES", str(BATCH_SIZE)))
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() in {"1", "true", "yes"}
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "3600"))
 CONTINUOUS_RUN = os.getenv("CONTINUOUS_RUN", "true").lower() in {"1", "true", "yes"}
+PROCESSING_LOOP_DELAY_SECONDS = int(os.getenv("PROCESSING_LOOP_DELAY_SECONDS", "30"))
 
 MOBILE_HEADERS = {
     "User-Agent": (
@@ -839,8 +840,9 @@ def main():
 
         if not CONTINUOUS_RUN:
             break
-        # 有任务时立即继续下一轮，直到 no-logo 返回空
-        print("tasks processed, continue next cycle immediately...")
+        # 有任务时每轮之间短暂停顿，避免打满上游接口
+        print(f"tasks processed, sleep {PROCESSING_LOOP_DELAY_SECONDS}s then next cycle...")
+        time.sleep(PROCESSING_LOOP_DELAY_SECONDS)
 
 
 if __name__ == "__main__":
