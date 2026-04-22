@@ -4,6 +4,8 @@ services:
     container_name: logo-syncer
     restart: unless-stopped
     command: ["python3", "${RUN_SCRIPT:-sync_no_logo_batch.py}"]
+    volumes:
+      - athena-cache:/app/runtime
     environment:
       # Core loop controls
       BATCH_SIZE: "${BATCH_SIZE:-10}"
@@ -24,9 +26,13 @@ services:
       ATHENA_ACCESS_KEY: "${ATHENA_ACCESS_KEY}"
       ATHENA_SECRET_KEY: "${ATHENA_SECRET_KEY}"
       ATHENA_REGION_NAME: "${ATHENA_REGION_NAME:-us-west-2}"
+      ATHENA_TOKEN_CACHE_FILE: "${ATHENA_TOKEN_CACHE_FILE:-/app/runtime/athena_token_cache.json}"
       S3_KEY_PREFIX: "${S3_KEY_PREFIX:-images}"
       S3_BUCKET_NAME: "${S3_BUCKET_NAME:-}"
       UPLOAD_JSON_TO_S3: "${UPLOAD_JSON_TO_S3:-false}"
 
       # Alerts
       LARK_WEBHOOK_URL: "${LARK_WEBHOOK_URL}"
+
+volumes:
+  athena-cache:

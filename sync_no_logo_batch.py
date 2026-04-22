@@ -37,6 +37,10 @@ ATHENA_BASE_URL = os.getenv("ATHENA_BASE_URL", "https://xp-athena-test1-api.heli
 ATHENA_ACCESS_KEY = os.getenv("ATHENA_ACCESS_KEY", "8KPsuFGFyrfz")
 ATHENA_SECRET_KEY = os.getenv("ATHENA_SECRET_KEY", "C0JIsSNKNBJYFOuG6Evu")
 ATHENA_REGION_NAME = os.getenv("ATHENA_REGION_NAME", "us-west-2")
+ATHENA_TOKEN_CACHE_FILE = os.getenv(
+    "ATHENA_TOKEN_CACHE_FILE",
+    str(Path(__file__).resolve().parent / "athena_token_cache.json"),
+)
 S3_KEY_PREFIX = os.getenv("S3_KEY_PREFIX", "images").strip("/")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "")
 UPLOAD_JSON_TO_S3 = os.getenv("UPLOAD_JSON_TO_S3", "false").lower() in {"1", "true", "yes"}
@@ -51,6 +55,8 @@ PLAYWRIGHT_MAX_RETRIES = int(os.getenv("PLAYWRIGHT_MAX_RETRIES", "3"))
 PLAYWRIGHT_RETRY_DELAY_SECONDS = float(os.getenv("PLAYWRIGHT_RETRY_DELAY_SECONDS", "2"))
 ATHENA_UPLOAD_MAX_RETRIES = int(os.getenv("ATHENA_UPLOAD_MAX_RETRIES", "6"))
 ATHENA_UPLOAD_RETRY_BASE_SECONDS = float(os.getenv("ATHENA_UPLOAD_RETRY_BASE_SECONDS", "5"))
+
+_ATHENA_CLIENT: Optional[AthenaClient] = None
 
 MOBILE_HEADERS = {
     "User-Agent": (
@@ -502,13 +508,21 @@ def build_s3_key(*parts: str) -> str:
     return "/".join(cleaned)
 
 
+def get_athena_client() -> AthenaClient:
+    global _ATHENA_CLIENT
+    if _ATHENA_CLIENT is None:
+        _ATHENA_CLIENT = AthenaClient(
+            ATHENA_BASE_URL,
+            access_key=ATHENA_ACCESS_KEY,
+            secret_key=ATHENA_SECRET_KEY,
+            region_name=ATHENA_REGION_NAME,
+            token_cache_file=ATHENA_TOKEN_CACHE_FILE,
+        )
+    return _ATHENA_CLIENT
+
+
 def upload_outputs_to_s3(result: dict, sport_dir: Path, json_path: Path):
-    client = AthenaClient(
-        ATHENA_BASE_URL,
-        access_key=ATHENA_ACCESS_KEY,
-        secret_key=ATHENA_SECRET_KEY,
-        region_name=ATHENA_REGION_NAME,
-    )
+    client = get_athena_client()
 
     upload_targets = []
     for side in ("home", "away"):
