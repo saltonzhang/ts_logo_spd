@@ -1,0 +1,20 @@
+# Secrets
+.env
+
+# OS / IDE
+.DS_Store
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Runtime outputs
+*.png
+match_*.json
+unknown_sport/
+
+# Docker local artifacts
+*.log

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.DS_Store
+.vscode/
+.git/
+
+
+# Local runtime outputs
+unknown_sport/
+*.png
+match_*.json

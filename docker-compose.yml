@@ -1,0 +1,31 @@
+services:
+  logo-syncer:
+    build: .
+    container_name: logo-syncer
+    restart: unless-stopped
+    environment:
+      # Core loop controls
+      BATCH_SIZE: "${BATCH_SIZE:-10}"
+      MAX_MATCHES: "${MAX_MATCHES:-10}"
+      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-3600}"
+      CONTINUOUS_RUN: "${CONTINUOUS_RUN:-true}"
+      DRY_RUN: "${DRY_RUN:-false}"
+
+      # What value is sent to put-logo: cdn_url | final_key | requested_key
+      PUT_LOGO_VALUE_FIELD: "${PUT_LOGO_VALUE_FIELD:-cdn_url}"
+
+      # APIs
+      NO_LOGO_API_URL: "${NO_LOGO_API_URL:-https://ls-sportdata-syncer-api.helix.city/api/v1/competitors/no-logo}"
+      PUT_LOGO_API_URL: "${PUT_LOGO_API_URL:-https://ls-sportdata-syncer-api.helix.city/api/v1/competitors/put-logo}"
+
+      # Athena/S3
+      ATHENA_BASE_URL: "${ATHENA_BASE_URL:-https://xp-athena-test1-api.helix.city}"
+      ATHENA_ACCESS_KEY: "${ATHENA_ACCESS_KEY}"
+      ATHENA_SECRET_KEY: "${ATHENA_SECRET_KEY}"
+      ATHENA_REGION_NAME: "${ATHENA_REGION_NAME:-us-west-2}"
+      S3_KEY_PREFIX: "${S3_KEY_PREFIX:-images}"
+      S3_BUCKET_NAME: "${S3_BUCKET_NAME:-}"
+      UPLOAD_JSON_TO_S3: "${UPLOAD_JSON_TO_S3:-false}"
+
+      # Alerts
+      LARK_WEBHOOK_URL: "${LARK_WEBHOOK_URL}"
