@@ -22,9 +22,23 @@ NO_LOGO_API_URL = os.getenv(
     "NO_LOGO_API_URL",
     "https://ls-sportdata-syncer-api.helix.city/api/v1/competitors/no-logo",
 )
+MATCH_SEARCH_TASK_URLS = [
+    x.strip()
+    for x in os.getenv(
+        "MATCH_SEARCH_TASK_URLS",
+        (
+            "https://xp-service-test1-api.helix.city/v1/match/search?sport_id=48242&status=2,"
+            "https://xp-service-test1-api.helix.city/v1/match/search?sport_id=6046&status=2"
+        ),
+    )
+    .replace("\n", ",")
+    .split(",")
+    if x.strip()
+]
+MATCH_SEARCH_REQUEST_TIMEOUT_SECONDS = int(os.getenv("MATCH_SEARCH_REQUEST_TIMEOUT_SECONDS", "30"))
 PUT_LOGO_API_URL = os.getenv(
     "PUT_LOGO_API_URL",
-    "https://ls-sportdata-syncer-api.helix.city/api/v1/competitors/put-logo",
+    "https://ls-sportdata-syncer-delivery-test1-api.helix.inner/api/v1/competitors/put-logo",
 )
 PUT_LOGO_VALUE_FIELD = os.getenv("PUT_LOGO_VALUE_FIELD", "cdn_url").strip().lower()
 
@@ -37,6 +51,7 @@ ATHENA_BASE_URL = os.getenv("ATHENA_BASE_URL", "https://xp-athena-test1-api.heli
 ATHENA_ACCESS_KEY = os.getenv("ATHENA_ACCESS_KEY", "8KPsuFGFyrfz")
 ATHENA_SECRET_KEY = os.getenv("ATHENA_SECRET_KEY", "C0JIsSNKNBJYFOuG6Evu")
 ATHENA_REGION_NAME = os.getenv("ATHENA_REGION_NAME", "us-west-2")
+ATHENA_REFRESH_BEFORE_SECONDS = int(os.getenv("ATHENA_REFRESH_BEFORE_SECONDS", "60"))
 ATHENA_TOKEN_CACHE_FILE = os.getenv(
     "ATHENA_TOKEN_CACHE_FILE",
     str(Path(__file__).resolve().parent / "athena_token_cache.json"),
@@ -55,8 +70,10 @@ PLAYWRIGHT_MAX_RETRIES = int(os.getenv("PLAYWRIGHT_MAX_RETRIES", "3"))
 PLAYWRIGHT_RETRY_DELAY_SECONDS = float(os.getenv("PLAYWRIGHT_RETRY_DELAY_SECONDS", "2"))
 ATHENA_UPLOAD_MAX_RETRIES = int(os.getenv("ATHENA_UPLOAD_MAX_RETRIES", "6"))
 ATHENA_UPLOAD_RETRY_BASE_SECONDS = float(os.getenv("ATHENA_UPLOAD_RETRY_BASE_SECONDS", "5"))
+ATHENA_RATE_LIMIT_COOLDOWN_SECONDS = int(os.getenv("ATHENA_RATE_LIMIT_COOLDOWN_SECONDS", "900"))
 
 _ATHENA_CLIENT: Optional[AthenaClient] = None
+_ATHENA_RATE_LIMIT_UNTIL_TS: float = 0.0
 
 MOBILE_HEADERS = {
     "User-Agent": (
@@ -65,6 +82,20 @@ MOBILE_HEADERS = {
         "Mobile/15E148 Safari/604.1"
     ),
     "Referer": BASE_URL,
+}
+MATCH_SEARCH_HEADERS = {
+    "accept": "*/*",
+    "accept-language": "en",
+    "cache-control": "no-cache, no-store, must-revalidate",
+    "content-type": "application/json",
+    "origin": BASE_URL.rstrip("/"),
+    "referer": BASE_URL,
+    "user-agent": (
+        "Mozilla/5.0 (Linux; Android 8.0.0; SM-G955U Build/R16NW) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Mobile Safari/537.36"
+    ),
+    "x-source": os.getenv("MATCH_SEARCH_X_SOURCE", "ls"),
+    "x-timezone": os.getenv("MATCH_SEARCH_TIMEZONE", "Asia/Shanghai"),
 }
 
 
@@ -134,15 +165,74 @@ def fetch_html(url: str, headers: Dict[str, str]) -> str:
 
 
 def fetch_no_logo_tasks(size: int) -> List[Dict[str, Any]]:
-    resp = requests.get(NO_LOGO_API_URL, params={"size": size}, timeout=30)
-    resp.raise_for_status()
-    body = resp.json()
-    if body.get("code") != 0:
-        raise RuntimeError(f"no-logo接口返回异常: {body}")
-    data = body.get("data")
-    if not isinstance(data, list):
-        raise RuntimeError(f"no-logo接口data类型异常: {type(data).__name__}")
-    return data
+    task_groups: List[List[Dict[str, Any]]] = []
+    errors = []
+
+    for url in MATCH_SEARCH_TASK_URLS:
+        url_tasks: List[Dict[str, Any]] = []
+        try:
+            resp = requests.get(url, headers=MATCH_SEARCH_HEADERS, timeout=MATCH_SEARCH_REQUEST_TIMEOUT_SECONDS)
+            resp.raise_for_status()
+            body = resp.json()
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+            continue
+
+        if str(body.get("code")) != "0":
+            errors.append(f"{url}: code异常 {body}")
+            continue
+
+        data = body.get("data") or {}
+        groups = data.get("list") or []
+        if not isinstance(groups, list):
+            errors.append(f"{url}: data.list类型异常 {type(groups).__name__}")
+            continue
+
+        for group in groups:
+            sport_id = str((group or {}).get("sport_id") or "").strip()
+            events = (group or {}).get("events") or []
+            if not isinstance(events, list):
+                continue
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                match_id = str(event.get("event_id") or "").strip()
+                if not match_id:
+                    continue
+                home = event.get("home_competitor") or {}
+                away = event.get("away_competitor") or {}
+                url_tasks.append(
+                    {
+                        "match_id": match_id,
+                        "sport_id": sport_id,
+                        "home_id": str(home.get("competitor_id") or "").strip() or None,
+                        "away_id": str(away.get("competitor_id") or "").strip() or None,
+                        "home_name": home.get("name"),
+                        "away_name": away.get("name"),
+                        "match_time": event.get("start_time"),
+                        "source": "match_search_status_2",
+                    }
+                )
+        task_groups.append(url_tasks)
+
+    tasks: List[Dict[str, Any]] = []
+    max_group_len = max((len(group) for group in task_groups), default=0)
+    for idx in range(max_group_len):
+        for group in task_groups:
+            if idx < len(group):
+                tasks.append(group[idx])
+
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for task in tasks:
+        match_id = str(task.get("match_id") or "").strip()
+        if match_id and match_id not in deduped:
+            deduped[match_id] = task
+
+    if not deduped and errors:
+        raise RuntimeError("match-search接口获取失败: " + "; ".join(errors[:5]))
+    if errors:
+        print("match-search部分接口异常: " + "; ".join(errors[:5]))
+    return list(deduped.values())[:size]
 
 
 def parse_dom(html: str, match_url: str, match_id: str) -> dict:
@@ -515,6 +605,7 @@ def get_athena_client() -> AthenaClient:
             ATHENA_BASE_URL,
             access_key=ATHENA_ACCESS_KEY,
             secret_key=ATHENA_SECRET_KEY,
+            refresh_before_seconds=ATHENA_REFRESH_BEFORE_SECONDS,
             region_name=ATHENA_REGION_NAME,
             token_cache_file=ATHENA_TOKEN_CACHE_FILE,
         )
@@ -522,6 +613,7 @@ def get_athena_client() -> AthenaClient:
 
 
 def upload_outputs_to_s3(result: dict, sport_dir: Path, json_path: Path):
+    global _ATHENA_RATE_LIMIT_UNTIL_TS
     client = get_athena_client()
 
     upload_targets = []
@@ -538,7 +630,20 @@ def upload_outputs_to_s3(result: dict, sport_dir: Path, json_path: Path):
 
     uploaded = []
     issues = []
+    now_ts = time.time()
+    if now_ts < _ATHENA_RATE_LIMIT_UNTIL_TS:
+        remain = int(_ATHENA_RATE_LIMIT_UNTIL_TS - now_ts)
+        issues.append(f"Athena限流冷却中，跳过上传，剩余约{remain}s")
+        result["s3_uploads"] = uploaded
+        result["s3_upload_issues"] = issues
+        result["s3_key_prefix"] = S3_KEY_PREFIX
+        return uploaded, issues
+
+    hit_rate_limit = False
     for label, file_path, key in upload_targets:
+        if hit_rate_limit:
+            issues.append(f"{label} 上传跳过: Athena限流冷却中")
+            continue
         if not file_path.exists():
             issues.append(f"{label} 文件不存在: {file_path}")
             continue
@@ -575,6 +680,12 @@ def upload_outputs_to_s3(result: dict, sport_dir: Path, json_path: Path):
         if last_exc is not None:
             final_key = (resolved or {}).get("final_key", key)
             issues.append(f"{label} 上传失败: key={final_key}, err={last_exc}")
+            if is_athena_rate_limited_error(last_exc):
+                _ATHENA_RATE_LIMIT_UNTIL_TS = max(
+                    _ATHENA_RATE_LIMIT_UNTIL_TS,
+                    time.time() + ATHENA_RATE_LIMIT_COOLDOWN_SECONDS,
+                )
+                hit_rate_limit = True
 
     result["s3_uploads"] = uploaded
     result["s3_upload_issues"] = issues
@@ -852,7 +963,7 @@ def main():
             text = (
                 "logo_spd批处理汇总\n"
                 f"cycle: {cycle}\n"
-                f"fetch no-logo error: {exc}"
+                f"fetch match-search error: {exc}"
             )
             notified = send_lark_text(text)
             print(text)
@@ -872,7 +983,7 @@ def main():
             idle_text = (
                 "logo_spd轮询状态\n"
                 f"cycle: {cycle}\n"
-                "no match_id from no-logo api"
+                "no match_id from match-search api"
             )
             print(idle_text)
             if not CONTINUOUS_RUN:

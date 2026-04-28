@@ -21,6 +21,7 @@ ATHENA_BASE_URL = os.getenv("ATHENA_BASE_URL", "https://xp-athena-test1-api.heli
 ATHENA_ACCESS_KEY = os.getenv("ATHENA_ACCESS_KEY", "8KPsuFGFyrfz")
 ATHENA_SECRET_KEY = os.getenv("ATHENA_SECRET_KEY", "C0JIsSNKNBJYFOuG6Evu")
 ATHENA_REGION_NAME = os.getenv("ATHENA_REGION_NAME", "us-west-2")
+ATHENA_REFRESH_BEFORE_SECONDS = int(os.getenv("ATHENA_REFRESH_BEFORE_SECONDS", "60"))
 ATHENA_TOKEN_CACHE_FILE = os.getenv(
     "ATHENA_TOKEN_CACHE_FILE",
     str(Path(__file__).resolve().parent / "athena_token_cache.json"),
@@ -552,6 +553,7 @@ def get_athena_client():
             ATHENA_BASE_URL,
             access_key=ATHENA_ACCESS_KEY,
             secret_key=ATHENA_SECRET_KEY,
+            refresh_before_seconds=ATHENA_REFRESH_BEFORE_SECONDS,
             region_name=ATHENA_REGION_NAME,
             token_cache_file=ATHENA_TOKEN_CACHE_FILE,
         )

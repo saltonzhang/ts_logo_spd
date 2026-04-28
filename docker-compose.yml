@@ -19,6 +19,8 @@ services:
 
       # APIs
       NO_LOGO_API_URL: "${NO_LOGO_API_URL:-https://ls-sportdata-syncer-api.helix.city/api/v1/competitors/no-logo}"
+      MATCH_SEARCH_TASK_URLS: "${MATCH_SEARCH_TASK_URLS:-https://xp-service-test1-api.helix.city/v1/match/search?sport_id=48242&status=2,https://xp-service-test1-api.helix.city/v1/match/search?sport_id=6046&status=2}"
+      MATCH_SEARCH_REQUEST_TIMEOUT_SECONDS: "${MATCH_SEARCH_REQUEST_TIMEOUT_SECONDS:-30}"
       PUT_LOGO_API_URL: "${PUT_LOGO_API_URL:-https://ls-sportdata-syncer-api.helix.city/api/v1/competitors/put-logo}"
 
       # Athena/S3
@@ -26,10 +28,14 @@ services:
       ATHENA_ACCESS_KEY: "${ATHENA_ACCESS_KEY}"
       ATHENA_SECRET_KEY: "${ATHENA_SECRET_KEY}"
       ATHENA_REGION_NAME: "${ATHENA_REGION_NAME:-us-west-2}"
+      ATHENA_REFRESH_BEFORE_SECONDS: "${ATHENA_REFRESH_BEFORE_SECONDS:-60}"
       ATHENA_TOKEN_CACHE_FILE: "${ATHENA_TOKEN_CACHE_FILE:-/app/runtime/athena_token_cache.json}"
       S3_KEY_PREFIX: "${S3_KEY_PREFIX:-images}"
       S3_BUCKET_NAME: "${S3_BUCKET_NAME:-}"
       UPLOAD_JSON_TO_S3: "${UPLOAD_JSON_TO_S3:-false}"
+      ATHENA_UPLOAD_MAX_RETRIES: "${ATHENA_UPLOAD_MAX_RETRIES:-6}"
+      ATHENA_UPLOAD_RETRY_BASE_SECONDS: "${ATHENA_UPLOAD_RETRY_BASE_SECONDS:-5}"
+      ATHENA_RATE_LIMIT_COOLDOWN_SECONDS: "${ATHENA_RATE_LIMIT_COOLDOWN_SECONDS:-900}"
 
       # Alerts
       LARK_WEBHOOK_URL: "${LARK_WEBHOOK_URL}"

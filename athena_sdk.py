@@ -64,7 +64,7 @@ class AthenaClient:
         access_key: str,
         secret_key: str,
         timeout_seconds: int = 10,
-        refresh_before_seconds: int = 600,
+        refresh_before_seconds: int = 60,
         region_name: Optional[str] = None,
         token_cache_file: Optional[str] = None,
     ) -> None:
@@ -206,7 +206,12 @@ class AthenaClient:
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
-        return (expires_at - now) > self._refresh_before
+        dynamic_refresh = self._refresh_before
+        if token.expires_in > 0:
+            # 避免 refresh_before 比 token TTL 还大，导致每次都被判定无效。
+            dynamic_secs = max(30, int(token.expires_in * 0.2))
+            dynamic_refresh = min(self._refresh_before, timedelta(seconds=dynamic_secs))
+        return (expires_at - now) > dynamic_refresh
 
     def _is_token_not_expired(self, token: CredentialsTokenResponse) -> bool:
         expires_at = token.expires_at
